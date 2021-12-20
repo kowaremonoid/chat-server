@@ -1,28 +1,49 @@
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    sync::broadcast,
+};
 
-#[get("/")]
-async fn hello() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
-}
+#[tokio::main]
+async fn main() {
+    let listener = TcpListener::bind("localhost:8080").await.unwrap();
 
-#[post("/echo")]
-async fn echo(req_body: String) -> impl Responder {
-    HttpResponse::Ok().body(req_body)
-}
+    let (tx, _rx) = broadcast::channel(10);
 
-async fn manual_hello() -> impl Responder {
-    HttpResponse::Ok().body("Hey there!")
-}
+    loop {
+        let (mut socket, addr) = listener.accept().await.unwrap();
 
-#[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
-        App::new()
-            .service(hello)
-            .service(echo)
-            .route("/hey", web::get().to(manual_hello))
-    })
-    .bind("0.0.0.0:8080")?
-    .run()
-    .await
+        let tx = tx.clone();
+        let mut rx = tx.subscribe();
+
+        tokio::spawn(async move {
+            let (reader, mut writer) = socket.split();
+
+            let mut reader = BufReader::new(reader);
+
+            let mut line = String::new();
+
+            loop {
+                tokio::select! {
+                    result = reader.read_line(&mut line) => {
+
+                        if result.unwrap() == 0 {
+                            break;
+                        }
+
+                        tx.send((line.clone(), addr)).unwrap();
+                        line.clear();
+                    }
+                    result = rx.recv() => {
+                        let (msg, other_addr) = result.unwrap();
+
+                        if addr != other_addr {
+                        writer.write_all(msg.as_bytes()).await.unwrap();
+                        }
+
+                    }
+                }
+            }
+        });
+    }
 }
